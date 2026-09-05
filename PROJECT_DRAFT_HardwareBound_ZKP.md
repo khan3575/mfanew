@@ -56,11 +56,14 @@ Everything below explains *why* this works, *proves* it, and lays out *how to bu
 
 ## 2. The problem, stated precisely
 
-A 4-digit PIN has only ~13 bits of entropy. Any scheme that stores a value **derived only
-from the PIN** can be broken by trying all 10,000 PINs. The old design stored `Y = PIN·B`;
-an attacker who steals `Y` just computes `0·B, 1·B, 2·B, …` until one matches — done in
-milliseconds. **We proved this in code: the old design leaks the PIN in ~7 ms** (see §7,
-result 5a).
+A 4-digit PIN has only ~13 bits of entropy — 10,000 possibilities. This is the whole
+difficulty, and it is independent of which cryptosystem is used:
+
+> **Any scheme that stores a public verifier derived *only* from the PIN is broken by
+> exhaustive search.** The attacker who steals the verifier simply computes the same
+> derivation for each of the 10,000 candidate PINs and compares. Because the derivation is
+> public and the search space is tiny, this succeeds regardless of how strong the underlying
+> hard problem is. A 2²⁵⁶-hard group does not help when the *input* has 2¹³ possibilities.
 
 So the challenge is not "how to hide the PIN on the wire" (a ZKP already does that) — it is:
 
@@ -82,18 +85,23 @@ never leaves the chip:
    x  =  H( device_key  ‖  PIN )   mod L
 ```
 
-- `device_key` — a random 256-bit value generated once at manufacturing, burned into the
-  ESP32's eFuse / secure storage. Software cannot read it out.
+- `device_key` — a random 256-bit value generated **on the device during provisioning**
+  (§8, Phase 3) and burned into the ESP32's eFuse / secure storage. It is never printed,
+  logged, or transmitted, and application software cannot read it back out. Generating it
+  on-device rather than at manufacturing means no other party ever holds a copy.
 - `PIN` — the 4 digits the user types.
 - `x` — the secret scalar. High-entropy now (because `device_key` is), and it never exists
   anywhere except transiently in the chip's RAM during login.
 - `Y = x·B` — the public key, sent to the server once at registration and stored.
 
-**Why this fixes the honeypot problem:** to brute-force the PIN from a stolen `Y`, an
-attacker must try `H(device_key ‖ guess)·B` for each PIN guess — but they don't have
-`device_key`. Their search space explodes from **10⁴** to **10⁴ × 2²⁵⁶**, which is
-infeasible. **We proved this too: with the device key unknown, 2,000 PIN guesses produced
-zero matches** (§7, result 5b). Server theft alone is now worthless.
+**Why this fixes the honeypot problem:** to recover the PIN from a stolen `Y`, an attacker
+must compute `H(device_key ‖ guess)·B` for each PIN guess — but they do not have
+`device_key`. Exhausting the PIN space therefore yields nothing at all: the 10,000-guess
+attack that breaks a PIN-only verifier simply fails. To succeed, the attacker must either
+find the 256-bit `device_key` or solve the Ed25519 discrete-logarithm problem for `x`
+directly, which is **≈2¹²⁶ work (~128-bit security)** — the same assumption every Ed25519
+key rests on. **Demonstrated in code: with the device key unknown, sweeping all 10,000 PINs
+produced zero matches** (§7, result 6). Server theft alone is worthless.
 
 **Why this is genuine multi-factor authentication (MFA), for free:**
 - **Knowledge factor** = the PIN (in the user's head).
@@ -116,11 +124,25 @@ Two parties:
 
 ```
    ┌────────────── ESP32 (Prover) ──────────────┐        ┌─────── Server (Verifier) ──────┐
-   │  device_key (eFuse, unreadable)             │        │  DB row: { user, Y }           │
-   │  user types PIN                             │        │  (no PIN, no key, no secret)   │
-   │  x = H(device_key ‖ PIN) mod L   [transient]│        │                                │
+   │  keypad  →  PIN entered here                │        │  DB row: { user, Y }           │
+   │  device_key (eFuse, unreadable)             │──T,s──▶│  (no PIN, no key, no secret)   │
+   │  x = H(device_key ‖ PIN) mod L   [transient]│◀───c───│                                │
+   │  wipe x, r, PIN after step 3                │        │  check s·B == T + c·Y          │
    └─────────────────────────────────────────────┘        └────────────────────────────────┘
+        the PIN never crosses this boundary  ───┘
 ```
+
+> ### ⚠️ Single-chip requirement — a design constraint, not a detail
+> **The keypad must be attached to the same chip that holds `device_key`.** The PIN has to
+> travel from the key matrix into the eFuse-holding MCU without crossing any inter-chip
+> bus, because a PIN on a UART between two boards is a PIN on the wire — exactly the flaw
+> this design exists to remove, merely relocated.
+>
+> If a multi-board arrangement is unavoidable (e.g. a separate camera or display board),
+> then either (a) `device_key` and the keypad live on the same MCU and only `T`, `c`, `s`
+> ever cross the bus, or (b) the inter-chip link must itself be authenticated and
+> encrypted, and the threat model in §10 must say so explicitly. **Option (a) is the design
+> intent.** Phase 1's bus-capture deliverable (§8) exists to verify this holds in practice.
 
 ---
 
@@ -205,12 +227,24 @@ carries no extractable information about the secret. ∎
 *(Verified in code: forged transcript with no `x` → "verifies True", §7.)*
 
 ### 6.4 Honeypot resistance — *a stolen database is useless*
-The server stores only `Y = x·B` where `x = H(device_key ‖ PIN)`. To recover the PIN,
-an attacker must find a PIN `g` with `H(device_key ‖ g)·B == Y`. Without `device_key`
-(256-bit, never leaves the chip), each guess is effectively random, so the attacker must
-search `10⁴ × 2²⁵⁶` combinations. Compare to the old design (`x = PIN`), where the space is
-just `10⁴`. ∎
-*(Verified in code: old design cracked in 7 ms; new design — 2,000 PIN guesses, 0 hits, §7.)*
+The server stores only `Y = x·B` where `x = H(device_key ‖ PIN)`. To recover the PIN, an
+attacker must find a PIN `g` with `H(device_key ‖ g)·B == Y`. Without `device_key`
+(256-bit, never leaves the chip) every guess is effectively random, so **exhausting the
+entire PIN space returns nothing** — the attack that breaks a PIN-only verifier does not
+apply.
+
+The attacker's remaining options are to recover `device_key` (256-bit, in tamper-resistant
+storage) or to attack `Y` directly by solving the discrete logarithm on Ed25519. The latter
+bounds the scheme's strength: with `L ≈ 2²⁵²`, Pollard rho costs **≈2¹²⁶ operations, i.e.
+~128-bit security** — the standard Ed25519 security level. ∎
+
+*(Demonstrated in code: with `device_key` unknown, all 10,000 PINs swept, 0 matches — §7,
+result 6.)*
+
+> **Note on the bound.** The security level is ~128-bit, not 2²⁵⁶ or `10⁴ × 2²⁵⁶`. The
+> attacker need not recover the *right* `(device_key, PIN)` pair — any `x` satisfying
+> `x·B = Y` breaks the scheme, and `x` lives mod `L`. Quoting a larger figure would
+> overstate the guarantee.
 
 ### 6.5 Replay / man-in-the-middle resistance
 Every login uses a fresh random `r` (new `T`) and a fresh server challenge `c`. A response
@@ -232,27 +266,41 @@ the whole protocol. Output:
 [params] field p = 2^255-19, group order L is a 253-bit prime
 
 2. AUTHENTICATION
-   verify  s*B == T + c*Y  ->  True          <== COMPLETENESS
-   wrong PIN 9999 ->  verify = False          <== correctly REJECTED
+   verify  s*B == T + c*Y  ->  True                     <== COMPLETENESS (§6.1)
+   wrong PIN 9999 (fresh r,c) ->  verify = False        <== correctly REJECTED
 
 3. SOUNDNESS
-   extracted x == real x ?  True              <== proof-of-knowledge
+   extracted x == real x ?  True                        <== proof-of-knowledge (§6.2)
 
 4. ZERO-KNOWLEDGE
-   forged transcript verifies ?  True         <== leaks nothing about x
+   forged transcript verifies ?  True                   <== leaks nothing about x (§6.3)
 
-5. HONEYPOT / SERVER-BREACH
-   (a) OLD  x=int(PIN):  recovered PIN = 1234  in 7 ms          <== BROKEN
-   (b) NEW  x=H(device_key||PIN): 2000 guesses, hits = False    <== INFEASIBLE
+5. REPLAY AND TAMPERING                                 <== (§6.5)
+   replay recorded s against c' ->  verify = False      <== REPLAY REJECTED
+   tampered response s+1 on original c ->  False        <== TAMPER REJECTED
+   tampered commitment T+B on original c ->  False      <== TAMPER REJECTED
+
+6. HONEYPOT / SERVER-BREACH                             <== (§6.4)
+   attacker fixes one wrong device_key, tries ALL 10,000 PINs
+   matches found = 0                                    <== PIN SPACE EXHAUSTED, NO RESULT
 ```
 
-Every security claim in §6 is matched by a passing check here. This is the discipline the
-earlier paper lacked: **no claim without a demonstration.**
+**Each of the five security properties in §6 has a corresponding passing check above**
+(§6.1 → 2, §6.2 → 3, §6.3 → 4, §6.4 → 6, §6.5 → 5). This is the discipline the earlier
+work lacked: **no claim without a demonstration.**
 
-> ⚠️ **Honest note:** this PoC is in Python, on a PC. It proves the *math and the security
-> logic* are correct. It does **not** prove on-device performance — that requires porting to
-> the ESP32 (§8) and measuring there. We will not report any "7.4 ms on ESP32"-style number
-> until it is measured on the actual chip.
+Two things to note about how the honeypot check is run, because the details are what make
+it meaningful:
+- The attacker's `device_key` guess is **fixed**, and the sweep covers **all 10,000 PINs**
+  with no early exit. This is the actual attack, run to completion — not a sample.
+- Zero matches is the expected and the only acceptable result. A partial sweep, or one that
+  re-randomised the key each iteration, would demonstrate nothing.
+
+> ⚠️ **Scope of this PoC.** It is Python, on a PC. It proves the **maths and the security
+> logic** are correct. It proves **nothing about on-device performance** — that requires
+> porting to the ESP32 (§8) and measuring there. **No timing from this file may be quoted
+> for an ESP32, and no performance figure will be reported until it is measured on the
+> actual chip** (§8, Phase 4).
 
 ---
 
@@ -349,11 +397,22 @@ write — and it converts our weakest claim into a checkable result.*
 - Full server-database theft (stored `Y` is not brute-forceable without `device_key`).
 - Replay of captured logins.
 
+**Explicit assumption — the key store is honest.**
+We assume the ESP32's eFuse/secure storage behaves as specified: it holds `device_key`,
+does not leak it to application software, and returns it faithfully. **The scheme's
+security rests entirely on this assumption.** It is worth stating plainly, because the
+current state of the art no longer grants it: Friedrichs et al. (EUROCRYPT 2026,
+`papers/P4_...pdf`) construct device-bound credentials that preserve user privacy **even
+when the secure element is subverted or fully corrupted**, on the grounds that secure
+elements are black-box components whose honesty is hard to vet. We do not achieve that.
+Removing this assumption is future work (§12).
+
 **Does *not* fully protect against:**
 - **Physical extraction of `device_key`** (e.g., invasive chip attacks). If an attacker
   gets both the server DB *and* the chip's key, the 4-digit PIN can then be brute-forced
   offline. This is a strictly stronger attacker; we scope it out and note eFuse/secure-boot
   as the mitigation.
+- **A subverted or malicious key store**, per the assumption above.
 - **Online guessing** of the PIN against a live device/server — mitigated by rate-limiting,
   not by the crypto. (Fundamental to any 4-digit secret.)
 - A compromised device at login time (malware on the prover) — out of scope, as for any
@@ -365,9 +424,14 @@ We state these plainly rather than overclaim — the opposite of the earlier dra
 
 ## 11. What changed from the old design (and why)
 
+*This table records **design decisions and the reasoning behind them**. It is not a
+performance comparison: no measurement from the previous project is carried forward, and
+none is quoted here. See `PAST_WORK_AND_DESCRIPTION.md` for what that project was, and
+`archive/PAPER_VS_CODE_AUDIT.md` for the evidence.*
+
 | Old design | New design | Reason |
 |---|---|---|
-| Secret `x = int(PIN)` | `x = H(device_key ‖ PIN) mod L` | Old was crackable in 7 ms; new needs the chip key too |
+| Secret `x = int(PIN)` | `x = H(device_key ‖ PIN) mod L` | A verifier derived from ~13 bits falls to exhaustive search regardless of the group's strength; the new secret is high-entropy and requires the chip key |
 | 1024-bit modular-exponentiation, malformed subgroup | Ed25519 (253-bit prime-order group) | Faster, smaller, ~128-bit security, standard & correct |
 | ZKP was a PC-only *simulation*; device sent cleartext PIN | ZKP runs **on the ESP32**; PIN never leaves the chip | This is the actual contribution; must be real |
 | "Honeypot elimination" (false) | Honeypot resistance via hardware binding (proven) | Claim now matches reality |
@@ -389,4 +453,6 @@ We state these plainly rather than overclaim — the opposite of the earlier dra
 ```
 python3 redesign_proof_of_concept/hardware_bound_schnorr_poc.py
 ```
-*Every property in §6 prints a passing result over the real Ed25519 curve.*
+*All five security properties in §6 print a passing result over the real Ed25519 curve
+(§6.1 completeness, §6.2 soundness, §6.3 zero-knowledge, §6.4 honeypot resistance,
+§6.5 replay/tamper rejection). The script reports **no timings for the ESP32**, by design.*

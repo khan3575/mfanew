@@ -3,7 +3,7 @@
 **Created:** 2026-09-06
 **Purpose:** Classify everything currently in this repository before anything is deleted, so the repo becomes a clean foundation for a new, valid ZKP + MFA project — and so we have a permanent record of what was removed and why.
 
-**Status: Stages 1, 3 and 4 executed 2026-09-06; `MFA/` removed per decision. Stage 2 (claim-level fixes) still outstanding.** See the removal log in §6.
+**Status: ALL STAGES COMPLETE (2026-09-06).** The repo is now a clean starting point. See the removal log in §6 and the claim-level record in §2.
 
 ---
 
@@ -70,24 +70,25 @@ Files can be clean overall and still carry contaminated passages. These are the 
 
 | Location | Issue | Action |
 |---|---|---|
-| §2 | *"The old design stored `Y = PIN·B`"* — false. The old system used `g^PIN mod p`, not a curve. | ❌ Remove the old-design comparison. Motivate the honeypot problem generically: *any* scheme storing a verifier derived from a ~13-bit secret is brute-forceable. |
-| §2, §6.4, §11 | *"leaks the PIN in ~7 ms"* — a number produced by the PoC re-implementing a system that never existed. | ❌ Remove all three instances. |
-| §3, §6.4 | Search space stated as `10⁴ × 2²⁵⁶` ≈ 2²⁶⁹ | 🔧 Wrong, and contradicts §11's own "~128-bit security". The real bound is the Ed25519 DLP, ≈2¹²⁶. Correct to ~128-bit. |
-| §7, §9, Appendix | *"Every security claim in §6 is matched by a passing check"* / *"The PoC already passes the logic versions of these"* | ✅ **Already fixed in §9.** Still to fix in §7 and the Appendix line — §6.5 (replay) has no test. |
-| §3 vs §8 Phase 3 | `device_key` "generated at manufacturing" vs generated during provisioning | 🔧 Pick one; they are different trust models. |
-| §4 | Architecture diagram shows one chip; the real hardware is two boards with a UART between them | 🔧 Either move to a single board or show the bus and state what crosses it. |
-| §10 | Assumes the eFuse key store is honest | 🔧 Keep the assumption, but state it explicitly and cite P4 (EUROCRYPT 2026), which designs for a *subverted* secure element. |
-| §8 Phases 4–5 | — | ✅ **Clean, rewritten today.** Per-operation table, `n` and spread, ProVerif. |
+| §2 | *"The old design stored `Y = PIN·B`"* — false | ✅ **DONE.** Old-design comparison removed. §2 now argues generically: any verifier derived from a ~13-bit secret falls to exhaustive search, whatever the group |
+| §2, §6.4, §11 | *"leaks the PIN in ~7 ms"* — fabricated provenance | ✅ **DONE.** All three instances removed |
+| §3, §6.4 | Search space stated as `10⁴ × 2²⁵⁶` ≈ 2²⁶⁹ | ✅ **DONE.** Corrected to ≈2¹²⁶ (~128-bit, Ed25519 DLP). A note in §6.4 explains why the larger figure is wrong, so the error is not silently reintroduced |
+| §7, §9, Appendix | Claimed all §6 properties had passing checks; §6.5 had none | ✅ **DONE.** Replay/tamper tests now exist in the PoC, so the claim is true. §7 maps each property to its check |
+| §3 vs §8 Phase 3 | `device_key` "at manufacturing" vs during provisioning | ✅ **DONE.** Settled on on-device provisioning, with the trust rationale stated: no other party ever holds a copy |
+| §4 | Diagram showed one chip; real hardware was two boards with a UART | ✅ **DONE.** Diagram now shows the trust boundary, plus an explicit single-chip requirement: the keypad must sit on the eFuse-holding MCU, or the PIN is merely relocated onto a bus |
+| §10 | Assumes the eFuse key store is honest | ✅ **DONE.** Stated as an explicit assumption, citing P4 (EUROCRYPT 2026) which tolerates a *subverted* SE, and noting we do not achieve that |
+| §8 Phases 4–5 | — | ✅ **DONE.** Per-operation table, `n` and spread, ProVerif |
 
 ### `redesign_proof_of_concept/hardware_bound_schnorr_poc.py`
 
 | Location | Issue | Action |
 |---|---|---|
-| Lines 104–110 | The "OLD" brute-force attack — Ed25519 `x = int(PIN)`, a system that never existed | ❌ **Delete this block.** It is the single most contaminated thing in otherwise clean code. |
-| Lines 111–118 | Honeypot test draws a **fresh random device key each iteration** and tries only 2,000 of 10,000 PINs | 🔧 Rewrite: fix the device key, sweep all 10,000 PINs, report zero matches. |
-| — | No replay test, no tampered-`s` test | 🔧 Add both. §6.5 is the draft's weakest claim. |
-| Lines 78–80 | Wrong-PIN check reuses `r` and `c` from the successful run | 🔧 Minor; draw fresh values so it resembles a real failed login. |
-| Lines 9–101 | Ed25519 arithmetic, completeness, soundness, ZK simulator | ✅ **Correct.** Self-check `L·B = identity` passes. Keep as is. |
+| old §5(a) | The "OLD" brute-force attack against a system that never existed | ✅ **DELETED** |
+| old §5(b) | Honeypot test redrew a random key each iteration, sampled 2,000 of 10,000 PINs | ✅ **REWRITTEN** as §6: one fixed wrong key, all 10,000 PINs, no early exit. Result: 0 matches |
+| — | No replay test, no tampered-`s` test | ✅ **ADDED** as §5: replay against a fresh challenge, tampered `s`, tampered `T` — all three rejected |
+| Wrong-PIN check | Reused `r` and `c` from the successful run | ✅ **FIXED.** Draws fresh `r`, `c`, as a real failed login would |
+| Ed25519 core | Arithmetic, completeness, soundness, ZK simulator | ✅ **Unchanged — correct.** Self-check `L·B = identity` still passes |
+| Docstring | Did not bound the PoC's scope | ✅ **ADDED:** states it proves maths and logic only, and that no timing here may be quoted for an ESP32 |
 
 ---
 
@@ -160,7 +161,7 @@ PaperWithRupokSir/
 **Recommended order** — safest first, so nothing irreversible happens early:
 
 1. ✅ **Stage 1 — `archive/` created, evidence moved.** Done 2026-09-06.
-2. ⬜ **Stage 2 — Fix the claim-level contamination** in the draft and PoC (§2). **Still outstanding — this is the next task.**
+2. ✅ **Stage 2 — Claim-level contamination fixed** in the draft and PoC. Done 2026-09-06; per-item record in §2.
 3. ✅ **Stage 3 — `README.md` rewritten** as the new project's entry point. Done.
 4. ✅ **Stage 4 — Stale draft PDF removed.** Done. (The figure-generating scripts went with `MFA/`.)
 5. ✅ **Stage 5 — `MFA/` deleted**, submodule breakage resolved by removal. Done.

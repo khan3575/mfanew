@@ -2,7 +2,11 @@
 Proof-of-concept: Hardware-Bound Schnorr (Ed25519) Zero-Knowledge Authentication
 Runs over the REAL Ed25519 curve group (RFC 8032 constants), extended coords.
 Demonstrates: completeness, soundness (witness extraction), honest-verifier
-zero-knowledge (simulator), and the honeypot / server-breach property.
+zero-knowledge (simulator), replay and tamper rejection, and the honeypot /
+server-breach property.
+
+Scope: this proves the MATH and the SECURITY LOGIC on a PC. It says nothing
+about on-device performance -- no timing here may be quoted for an ESP32.
 """
 import hashlib, secrets, time
 
@@ -75,9 +79,13 @@ print(f"commitment T = r*B          (r secret random)")
 print(f"challenge   c = {hex(c)[:22]}...")
 print(f"response    s = (r + c*x) mod L")
 print(f"verify  s*B == T + c*Y  ->  {verify(Y,T,c,s)}   <== COMPLETENESS\n")
+
+# wrong PIN: a real failed login draws its own fresh r and receives a fresh c
+r_bad, T_bad = commit()
+c_bad = secrets.randbelow(L-1)+1
 x_bad = kdf("9999", device_key)
-s_bad = (r + c*x_bad) % L
-print(f"wrong PIN 9999 ->  verify = {verify(Y, T, c, s_bad)}   <== correctly REJECTED\n")
+s_bad = (r_bad + c_bad*x_bad) % L
+print(f"wrong PIN 9999 (fresh r,c) ->  verify = {verify(Y, T_bad, c_bad, s_bad)}   <== correctly REJECTED\n")
 
 # =====================================================================
 print("="*70); print("3. SOUNDNESS  (extract secret from two answers on one commitment)"); print("="*70)
@@ -100,20 +108,33 @@ print(f"forged transcript verifies ?  {verify(Y, T_s, c_s, s_s)}")
 print("=> valid transcripts exist without the secret => a real one leaks nothing\n")
 
 # =====================================================================
-print("="*70); print("5. HONEYPOT / SERVER-BREACH  (attacker has stolen Y)"); print("="*70)
-# (a) OLD design x = int(PIN): brute force by walking i*B incrementally
-Y_weak = mul(int(PIN), B)
-t0=time.time(); P=IDENT; found=None
-for i in range(10000):
-    if eq(P, Y_weak): found=i; break
-    P = add(P, B)
-print(f"(a) OLD  x=int(PIN):  recovered PIN = {found}  in {(time.time()-t0)*1000:.0f} ms   <== BROKEN")
-# (b) NEW design: attacker tries all 10,000 PINs but does NOT have device_key
-t0=time.time(); N=2000; hit=False
-for g in range(N):
-    if eq(mul(kdf(f"{g:04d}", secrets.token_bytes(32)), B), Y): hit=True; break
-dt=(time.time()-t0)
-print(f"(b) NEW  x=H(device_key||PIN): {N} PIN guesses w/ wrong key, hits = {hit}  ({dt:.1f}s)")
-print(f"    without the 256-bit device_key, NO PIN guess matches Y.")
-print(f"    real search space = 10^4 PINs x 2^256 keys  <== INFEASIBLE\n")
+print("="*70); print("5. REPLAY AND TAMPERING  (attacker has a recorded transcript)"); print("="*70)
+# The attacker records a full, valid transcript (T, c, s) from a real login.
+# (a) Replay: reuse the recorded T and s against the NEXT session's challenge.
+c_new = secrets.randbelow(L-1)+1                 # server issues a fresh challenge
+while c_new == c: c_new = secrets.randbelow(L-1)+1
+print(f"recorded a valid transcript (T, c, s); server now issues a fresh c'")
+print(f"replay recorded s against c' ->  verify = {verify(Y, T, c_new, s)}   <== REPLAY REJECTED")
+# (b) Tampering: flip the response on the original challenge.
+s_tampered = (s + 1) % L
+print(f"tampered response s+1 on original c ->  verify = {verify(Y, T, c, s_tampered)}   <== TAMPER REJECTED")
+# (c) Tampering with the commitment instead.
+print(f"tampered commitment T+B on original c ->  verify = {verify(Y, add(T, B), c, s)}   <== TAMPER REJECTED")
+print("=> a captured transcript is worthless: s is bound to that one (T, c) pair\n")
+
+# =====================================================================
+print("="*70); print("6. HONEYPOT / SERVER-BREACH  (attacker has stolen Y)"); print("="*70)
+# The attacker holds Y and knows the PIN is 4 digits, but does NOT have device_key.
+# Fix one wrong key and sweep the ENTIRE PIN space -- the actual attack, run to completion.
+wrong_key = secrets.token_bytes(32)              # attacker's guess at device_key
+assert wrong_key != device_key
+t0 = time.time(); hits = 0
+for g in range(10000):                           # all 10^4 PINs, no early exit on failure
+    if eq(mul(kdf(f"{g:04d}", wrong_key), B), Y): hits += 1
+dt = time.time() - t0
+print(f"attacker fixes one wrong device_key and tries ALL 10,000 PINs")
+print(f"matches found = {hits}  ({dt:.1f}s)   <== ZERO")
+print(f"=> the PIN space alone is exhausted with no result. To succeed the attacker")
+print(f"   must also find the 256-bit device_key, or solve the Ed25519 discrete log")
+print(f"   directly (~2^126 work, i.e. ~128-bit security).\n")
 print("ALL PROPERTIES DEMONSTRATED ON THE REAL Ed25519 CURVE.")
