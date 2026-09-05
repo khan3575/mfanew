@@ -274,20 +274,68 @@ bad tries — the last line of defence for the online path).
 `device_key`, computes `Y` **on the device**, and registers `Y`. `device_key` must never be
 printed, logged, or transmitted.
 
-**Phase 4 — Measurement.** On the ESP32, measure and report honestly: proof-generation time,
-round-trip latency, RAM/flash footprint, and energy per authentication. Report mean ± standard
-deviation over many trials, not a single number.
+**Phase 4 — Measurement.** On the ESP32, measure and report honestly. Requirements below are
+set against what the current literature actually does — see `RESEARCH_STUDY.md` §3.4.
+
+*4a. Report per-operation, not one total.* The single number is what sank the previous
+attempt. Break the cost down so a reader can see where the time goes and reproduce it:
+
+| Operation | Mean | Std dev | n |
+|---|---|---|---|
+| Read `device_key` from eFuse | | | 100 |
+| Derive `x = H(device_key ‖ PIN) mod L` | | | 100 |
+| Commitment `T = r·B` | | | 100 |
+| Response `s = (r + c·x) mod L` | | | 100 |
+| **Total prover time (on-device)** | | | 100 |
+| Zeroisation of `x`, `r`, PIN | | | 100 |
+| Server verification `s·B == T + c·Y` | | | 100 |
+
+State beneath the table: exact ESP32 variant and clock, the Ed25519 library **and version**,
+whether the hardware accelerator was enabled, and the timer used. *(This format follows the
+most granular reporting in the field; that work omits its sample size, so stating `n` and a
+spread puts our table ahead of it.)*
+
+*4b. Also report, separately:* end-to-end round-trip latency (network included — kept
+distinct from 4a, never merged), RAM/flash footprint, and energy per authentication.
+
+*4c. Measurement discipline.*
+- **≥100 runs** per operation; report the **distribution** (boxplot), not just a mean.
+- **Do not overlap the crypto with other work** while timing it. Measuring the computation
+  concurrently with network or UI activity hides its true cost — an approach taken elsewhere
+  in the literature that makes those numbers unusable for comparison.
+- State in one sentence **exactly what interval each number covers**.
+- Report the **isolated on-device proof-generation time**. No retrieved paper reports this
+  for a sigma protocol on a microcontroller; it is the clearest small contribution available.
+
+*4d. Do not import numbers from the previous project as baselines.* If a comparison is
+needed, measure it fresh on the platform being claimed.
+
+**Phase 5 — Machine-checked security verification.** Model the protocol in **ProVerif** (free,
+automated) and include the output. Queries to run, at minimum:
+- secrecy of `device_key`, `x`, and the nonce `r` — the attacker must never derive them;
+- **injective correspondence** between commitment `T`, challenge `c` and response `s` — this
+  is the formal statement of replay resistance, and it is what §6.5 currently asserts in prose
+  with no evidence behind it.
+
+*Rationale: the two most rigorous papers in `RESEARCH_STUDY.md` (P1, P5) both do exactly this.
+A single-round sigma protocol is a small model — roughly a day to learn the syntax, hours to
+write — and it converts our weakest claim into a checkable result.*
 
 ---
 
 ## 9. What to evaluate (honest methodology)
 
-- **Performance:** on-device proof time, end-to-end latency, RAM/flash, energy — Ed25519
-  should be far lighter than the old 1024-bit approach; report the real numbers.
+- **Performance:** on-device proof time, end-to-end latency, RAM/flash, energy, reported per
+  the format in Phase 4a. Report the measured numbers on their own terms — no projections,
+  and no comparison against figures we did not measure ourselves on the stated platform.
 - **Security (functional):** correct PIN accepts; wrong PIN rejects; replayed transcript
-  rejects; tampered `s` rejects. (The PoC already passes the logic versions of these.)
-- **Honeypot (demonstrated attack):** show the old vs. new brute-force result as in §7 —
-  this is concrete, reproducible evidence, not a prose claim.
+  rejects; tampered `s` rejects.
+  ⚠️ *Currently only the first two are tested. The PoC has no replay test and no tampered-`s`
+  test — these must be added before this line can be claimed.*
+- **Honeypot (demonstrated attack):** with the device key unknown, sweep **all 10,000 PINs**
+  against the stored `Y` and show zero matches — a fixed key and a full sweep, not a partial
+  sample against randomly redrawn keys. Concrete, reproducible evidence rather than a prose
+  claim.
 - **No biometric accuracy study.** We deliberately drop it; with only knowledge + possession
   factors there is no dataset to under-power. (If biometrics are ever added, that is a
   separate, properly-sized study.)
